@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live2D Viewer</title>
+    <style>
+        #canvas-container {
+            position: relative;
+            width: 100%;
+            height: 500px;
+        }
+        #uploadArea {
+            margin-bottom: 20px;
+        }
+        #uploadArea div {
+            margin-bottom: 10px;
+        }
+        #debugInfo {
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <div id="uploadArea">
+        <div>
+            背景画像を選択：
+            <input type="file" id="backgroundInput" accept="image/*">
+        </div>
+        <div>
+            モデルファイルを選択（複数可）：
+            <input type="file" id="modelInput" multiple>
+        </div>
+        <div>
+            <button id="displayButton" disabled>表示</button>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+    <div id="debugInfo"></div>
+
+    <script>
+        let app, model;
+        const debugInfo = document.getElementById('debugInfo');
+        const displayButton = document.getElementById('displayButton');
+
+        function log(message) {
+            console.log(message);
+            debugInfo.textContent += message + '\n';
+        }
+
+        // ライブラリを非同期で読み込む
+        async function loadScripts() {
+            const scripts = [
+                { src: 'https://cdnjs.cloudflare.com/ajax/libs/pixi.js/5.3.3/pixi.min.js', name: 'PIXI.js' },
+                { src: 'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js', name: 'Live2D Cubism Core' },
+                { src: 'https://cdn.jsdelivr.net/npm/pixi-live2d-display/dist/index.min.js', name: 'PIXI Live2D Display' }
+            ];
+
+            for (const script of scripts) {
+                try {
+                    await new Promise((resolve, reject) => {
+                        const scriptElement = document.createElement('script');
+                        scriptElement.src = script.src;
+                        scriptElement.onload = resolve;
+                        scriptElement.onerror = () => reject(new Error(`Failed to load ${script.name}`));
+                        document.head.appendChild(scriptElement);
+                    });
+                    log(`Successfully loaded ${script.name}`);
+                } catch (error) {
+                    log(`Error loading ${script.name}: ${error.message}`);
+                    throw error; // Re-throw to stop the loading process
+                }
+            }
+        }
+
+        // ライブラリの読み込みを確認
+        function checkLibraries() {
+            if (typeof PIXI === 'undefined') {
+                throw new Error('PIXI library is not loaded');
+            }
+            log('PIXI is loaded');
+
+            if (typeof PIXI.live2d === 'undefined') {
+                throw new Error('PIXI Live2D library is not loaded');
+            }
+            log('PIXI.live2d is loaded');
+
+            if (typeof PIXI.live2d.Live2DModel === 'undefined') {
+                throw new Error('PIXI.live2d.Live2DModel is not available');
+            }
+            log('PIXI.live2d.Live2DModel is available');
+
+            log('All required libraries are loaded successfully');
+        }
+
+        // ライブラリを読み込み、ボタンを有効化
+        loadScripts().then(() => {
+            checkLibraries();
+            displayButton.disabled = false;
+            log('Libraries loaded. You can now use the display button.');
+        }).catch(error => {
+            log('Error during library loading process: ' + error.message);
+            console.error(error);
+        });
+
+        displayButton.addEventListener('click', async () => {
+            debugInfo.textContent = ''; // Clear previous debug info
+            const backgroundFile = document.getElementById('backgroundInput').files[0];
+            const modelFiles = document.getElementById('modelInput').files;
+
+            if (!backgroundFile || modelFiles.length === 0) {
+                alert('背景画像とモデルファイルを選択してください。');
+                return;
+            }
+
+            try {
+                // PixiJS アプリケーションの初期化
+                if (app) {
+                    app.destroy(true);
+                }
+                app = new PIXI.Application({
+                    width: 800,
+                    height: 600,
+                    transparent: true
+                });
+                document.getElementById('canvas-container').appendChild(app.view);
+                log('PixiJS Application created');
+
+                // 背景画像の設定
+                const backgroundTexture = await loadImage(backgroundFile);
+                const background = new PIXI.Sprite(backgroundTexture);
+                background.width = app.screen.width;
+                background.height = app.screen.height;
+                app.stage.addChild(background);
+                log('Background image loaded and added to stage');
+
+                // モデルファイルの読み込みと表示
+                const modelData = await readModelFiles(modelFiles);
+                log('Model files read: ' + Object.keys(modelData).join(', '));
+
+                // Find the .model3.json file
+                const modelJsonFile = Object.keys(modelData).find(file => file.endsWith('.model3.json'));
+                if (!modelJsonFile) {
+                    throw new Error('No .model3.json file found in the uploaded files.');
+                }
+
+                const modelJson = JSON.parse(new TextDecoder().decode(modelData[modelJsonFile]));
+                log('Model JSON parsed');
+
+                // Update file paths in the model JSON
+                updateModelPaths(modelJson, modelData);
+
+                // Create a ZIP-like object for pixi-live2d-display
+                const zipData = Object.fromEntries(
+                    Object.entries(modelData).map(([fileName, data]) => [
+                        fileName,
+                        new Uint8Array(data)
+                    ])
+                );
+
+                // Initialize Live2DModel
+                PIXI.live2d.Live2DModel.from(modelJson, { ...zipData }, {
+                    autoInteract: false,
+                    autoUpdate: true
+                }).then(live2dModel => {
+                    model = live2dModel;
+                    log('Live2D model created');
+
+                    // モデルのサイズと位置の調整
+                    model.scale.set(0.5);
+                    model.position.set(app.screen.width / 2, app.screen.height);
+                    model.anchor.set(0.5, 1);
+
+                    app.stage.addChild(model);
+                    log('Model added to stage');
+
+                    // Start the animation
+                    app.ticker.add(() => {
+                        if (model) {
+                            model.update(app.ticker.elapsedMS);
+                        }
+                    });
+                    log('Animation started');
+                }).catch(error => {
+                    log('Error initializing Live2D model: ' + error.message);
+                    console.error(error);
+                });
+
+            } catch (error) {
+                log('Error: ' + error.message);
+                console.error(error);
+            }
+        });
+
+        async function loadImage(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(PIXI.Texture.from(e.target.result));
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function readModelFiles(files) {
+            const modelData = {};
+            for (const file of files) {
+                const arrayBuffer = await file.arrayBuffer();
+                modelData[file.name] = arrayBuffer;
+            }
+            return modelData;
+        }
+
+        function updateModelPaths(modelJson, modelData) {
+            const updatePath = (obj) => {
+                if (obj && typeof obj === 'object') {
+                    for (let key in obj) {
+                        if (typeof obj[key] === 'string' && obj[key].includes('/')) {
+                            const fileName = obj[key].split('/').pop();
+                            if (fileName in modelData) {
+                                obj[key] = fileName;
+                            }
+                        } else {
+                            updatePath(obj[key]);
+                        }
+                    }
+                }
+            };
+            updatePath(modelJson);
+        }
+    </script>
+</body>
+</html>
+
+<!-- C:\Users\msk\Downloads\drive-download-20241001T133452Z-001 -->
